@@ -1,104 +1,109 @@
-from dotenv import load_dotenv
-load_dotenv()
-# # bot.py
 import discord
+from discord.ui import Button, View, Modal, TextInput
 import pyotp
 import os
 import json
+import time
+from dotenv import load_dotenv
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# Carrega o token do bot do Discord de uma variável de ambiente
-DISCORD_BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN')
+# --- CÓDIGO PARA MANTER ONLINE ---
+class HealthCheckHandler(BaseHTTPRequestHandler ):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot Online")
 
-# Define o caminho para o arquivo de armazenamento de segredos
-SECRETS_FILE = 'totp_secrets.json'
+def run_health_check():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    server.serve_forever()
 
-# Função para carregar segredos de um arquivo
+threading.Thread(target=run_health_check, daemon=True).start()
+# ---------------------------------
+
+load_dotenv()
+DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+SECRETS_FILE = "totp_secrets.json"
+
 def load_secrets():
     if os.path.exists(SECRETS_FILE):
-        with open(SECRETS_FILE, 'r') as f:
+        with open(SECRETS_FILE, "r") as f:
             return json.load(f)
     return {}
 
-# Função para salvar segredos em um arquivo
 def save_secrets(secrets):
-    with open(SECRETS_FILE, 'w') as f:
+    with open(SECRETS_FILE, "w") as f:
         json.dump(secrets, f, indent=4)
 
-# Carrega os segredos existentes ao iniciar o bot
 TOTP_SECRETS = load_secrets()
-
-# Inicializa o cliente do Discord com as intenções necessárias
 intents = discord.Intents.default()
 intents.message_content = True
-client = discord.Client(intents=intents)
+bot = discord.Bot(intents=intents)
 
-@client.event
+class Add2FAModal(Modal):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs, title="Configurar Novo 2FA")
+        self.add_item(TextInput(label="Nome do Serviço", placeholder="Ex: EpicGames, Google", required=True))
+        self.add_item(TextInput(label="Chave Secreta (Secret Key)", placeholder="Cole aqui a chave que o site te deu", required=True))
+
+    async def callback(self, interaction: discord.Interaction):
+        service = self.children[0].value.lower()
+        secret = self.children[1].value.replace(" ", "").upper() # Limpa espaços e coloca em maiúsculo
+        
+        try:
+            # Testa se a chave é válida
+            pyotp.TOTP(secret).now()
+            TOTP_SECRETS[service] = secret
+            save_secrets(TOTP_SECRETS)
+            await interaction.response.send_message(f"✅ **{service}** configurado com sucesso!", ephemeral=True)
+        except:
+            await interaction.response.send_message("❌ Erro: A chave secreta que você colou parece inválida. Verifique e tente de novo.", ephemeral=True)
+
+class Get2FAModal(Modal):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs, title="Gerar Código")
+        self.add_item(TextInput(label="Nome do Serviço", placeholder="Ex: google", required=True))
+
+    async def callback(self, interaction: discord.Interaction):
+        service = self.children[0].value.lower()
+        if service in TOTP_SECRETS:
+            # Gera o código garantindo a sincronia de tempo
+            totp = pyotp.TOTP(TOTP_SECRETS[service])
+            codigo = totp.now()
+            
+            # Calcula quanto tempo falta para o código expirar
+            tempo_restante = 30 - (int(time.time()) % 30)
+            
+            await interaction.response.send_message(
+                f"🔑 Código para **{service}**: `{codigo}`\n"
+                f"⏳ Expira em: `{tempo_restante}s`", 
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message("❌ Serviço não encontrado.", ephemeral=True)
+
+class TwoFAView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="🔑 Gerar Código", style=discord.ButtonStyle.primary, custom_id="gen")
+    async def gen(self, button, interaction):
+        await interaction.response.send_modal(Get2FAModal())
+
+    @discord.ui.button(label="⚙️ Configurar Serviço", style=discord.ButtonStyle.success, custom_id="add")
+    async def add(self, button, interaction):
+        await interaction.response.send_modal(Add2FAModal())
+
+@bot.event
 async def on_ready():
-    print(f'Bot conectado como {client.user}')
-    print('Pronto para gerar códigos 2FA!')
+    print(f"Bot online como {bot.user}")
+    bot.add_view(TwoFAView())
 
-@client.event
-async def on_message(message):
-    if message.author == client.user:
-        return
+@bot.slash_command(name="2fa", description="Menu do Gerador 2FA")
+async def twofa(ctx):
+    await ctx.respond("📱 **Gerenciador de Autenticação 2FA**\nUse os botões abaixo:", view=TwoFAView())
 
-    # Comando para gerar um código 2FA
-    if message.content.startswith('!2fa'):
-        parts = message.content.split(' ')
-        if len(parts) == 2:
-            service_name = parts[1].lower()
-            if service_name in TOTP_SECRETS:
-                secret = TOTP_SECRETS[service_name]
-                try:
-                    totp = pyotp.TOTP(secret)
-                    current_otp = totp.now()
-                    await message.channel.send(f'O código 2FA para **{service_name}** é: `{current_otp}`')
-                except Exception as e:
-                    await message.channel.send(f'Erro ao gerar código 2FA para {service_name}: {e}')
-            else:
-                await message.channel.send(f'Serviço **{service_name}** não encontrado. Use `!list2fa` para ver os serviços configurados ou `!add2fa <nome_do_serviço>` para adicionar um novo.')
-        else:
-            await message.channel.send('Uso: `!2fa <nome_do_serviço>`')
-
-    # Comando para adicionar um novo serviço 2FA (gera um novo segredo)
-    elif message.content.startswith('!add2fa'):
-        parts = message.content.split(' ')
-        if len(parts) == 2:
-            service_name = parts[1].lower()
-            if service_name in TOTP_SECRETS:
-                await message.channel.send(f'O serviço **{service_name}** já existe. Use `!update2fa <nome_do_serviço> <novo_segredo>` para atualizar ou `!remove2fa <nome_do_serviço>` para remover.')
-            else:
-                new_secret = pyotp.random_base32()
-                TOTP_SECRETS[service_name] = new_secret
-                save_secrets(TOTP_SECRETS)
-                await message.channel.send(f'Novo serviço **{service_name}** adicionado com sucesso!\nSeu segredo 2FA é: `{new_secret}`\n**ATENÇÃO: Guarde este segredo em um local seguro! Ele não será exibido novamente.**')
-        else:
-            await message.channel.send('Uso: `!add2fa <nome_do_serviço>`')
-
-    # Comando para remover um serviço 2FA
-    elif message.content.startswith('!remove2fa'):
-        parts = message.content.split(' ')
-        if len(parts) == 2:
-            service_name = parts[1].lower()
-            if service_name in TOTP_SECRETS:
-                del TOTP_SECRETS[service_name]
-                save_secrets(TOTP_SECRETS)
-                await message.channel.send(f'Serviço **{service_name}** removido com sucesso.')
-            else:
-                await message.channel.send(f'Serviço **{service_name}** não encontrado.')
-        else:
-            await message.channel.send('Uso: `!remove2fa <nome_do_serviço>`')
-
-    # Comando para listar os serviços 2FA configurados
-    elif message.content.startswith('!list2fa'):
-        if TOTP_SECRETS:
-            services = '\n'.join([f'- {s}' for s in TOTP_SECRETS.keys()])
-            await message.channel.send(f'Serviços 2FA configurados:\n{services}')
-        else:
-            await message.channel.send('Nenhum serviço 2FA configurado ainda. Use `!add2fa <nome_do_serviço>` para adicionar um.')
-
-# Executa o bot com o token
 if DISCORD_BOT_TOKEN:
-    client.run(DISCORD_BOT_TOKEN)
-else:
-    print("Erro: O token do bot do Discord não foi encontrado. Por favor, defina a variável de ambiente 'DISCORD_BOT_TOKEN'.")
+    bot.run(DISCORD_BOT_TOKEN)
