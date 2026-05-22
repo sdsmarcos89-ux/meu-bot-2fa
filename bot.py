@@ -2,6 +2,7 @@ import discord
 import pyotp
 import os
 import threading
+import json
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from dotenv import load_dotenv
 
@@ -23,9 +24,23 @@ threading.Thread(target=run_health_check, daemon=True).start()
 load_dotenv()
 token = os.getenv("DISCORD_BOT_TOKEN")
 
-# Definindo as cores para o tema roxo e preto
-PURPLE_COLOR = 0x5865F2  # Um roxo padrão do Discord
-BLACK_COLOR = 0x23272A  # Um cinza escuro que se assemelha ao preto
+CONFIG_FILE = "config_panel.json"
+
+def load_config():
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {
+        "title": "🛡️ Rockstar Games e Autenticação de Dois Fatores (2FA)",
+        "description": "A segurança da sua conta Rockstar Games é primordial. A Autenticação de Dois Fatores (2FA) adiciona uma camada extra de proteção.",
+        "color": 0x5865F2,
+        "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/5/52/Rockstar_Games_Logo.svg/1200px-Rockstar_Games_Logo.svg.png",
+        "thumbnail_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/5/52/Rockstar_Games_Logo.svg/1200px-Rockstar_Games_Logo.svg.png"
+    }
+
+def save_config(config):
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=4, ensure_ascii=False)
 
 class SecretInputModal(discord.ui.Modal):
     def __init__(self, *args, **kwargs) -> None:
@@ -42,33 +57,22 @@ class SecretInputModal(discord.ui.Modal):
         try:
             totp = pyotp.TOTP(secret.replace(" ", "").upper())
             code = totp.now()
+            config = load_config()
             embed = discord.Embed(
                 title="🔑 Seu Código 2FA",
                 description=f"```\n{code}\n```\n\nEste código é válido por **30 segundos**. Gere um novo se expirar.",
-                color=PURPLE_COLOR
+                color=config["color"]
             )
             embed.set_footer(text="Rockstar 2FA Bot")
             await interaction.followup.send(embed=embed, ephemeral=True)
         except pyotp.otp.OTPError:
-            embed = discord.Embed(
-                title="❌ Chave Inválida!",
-                description="Por favor, verifique se a chave secreta que você inseriu está correta e tente novamente.",
-                color=discord.Color.red()
-            )
-            embed.set_footer(text="Rockstar 2FA Bot")
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            await interaction.followup.send("❌ Chave Inválida! Verifique se a SECRET está correta.", ephemeral=True)
         except Exception as e:
-            embed = discord.Embed(
-                title="❌ Erro Inesperado",
-                description=f"Ocorreu um erro ao gerar seu código: {e}",
-                color=discord.Color.red()
-            )
-            embed.set_footer(text="Rockstar 2FA Bot")
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            await interaction.followup.send(f"❌ Erro inesperado: {e}", ephemeral=True)
 
 class Generate2FAButton(discord.ui.View):
     def __init__(self):
-        super().__init__(timeout=None) # Timeout None para o botão ser persistente
+        super().__init__(timeout=None)
 
     @discord.ui.button(
         label="Gere 2fa code", 
@@ -80,70 +84,63 @@ class Generate2FAButton(discord.ui.View):
         modal = SecretInputModal(title="Insira sua Chave Secreta 2FA")
         await interaction.response.send_modal(modal)
 
-def get_rockstar_2fa_embed():
-    embed = discord.Embed(
-        title="🛡️ Rockstar Games e Autenticação de Dois Fatores (2FA)",
-        description=(
-            "A segurança da sua conta Rockstar Games é primordial. A Autenticação de Dois Fatores (2FA) adiciona uma camada extra de proteção, "
-            "garantindo que apenas você possa acessar sua conta, mesmo que sua senha seja comprometida. "
-            "Isso é crucial para proteger seus jogos, progresso e informações pessoais."
-        ),
-        color=PURPLE_COLOR
-    )
-
-    embed.add_field(
-        name="O que é 2FA?",
-        value=(
-            "2FA é um método de segurança que exige duas formas de verificação para acessar uma conta. "
-            "Normalmente, isso envolve algo que você sabe (sua senha) e algo que você tem (um código gerado por um aplicativo autenticador "
-            "no seu celular ou gerado por este bot)."
-        ),
-        inline=False
-    )
-
-    embed.add_field(
-        name="Como funciona o 2FA da Rockstar?",
-        value=(
-            "Ao ativar o 2FA na sua conta Rockstar Games, você precisará de um aplicativo autenticador "
-            "para gerar códigos temporários. Cada vez que você fizer login, além da sua senha, será solicitado um desses códigos. "
-            "Este bot ajuda a gerar esses códigos rapidamente através do botão abaixo."
-        ),
-        inline=False
-    )
-
-    embed.add_field(
-        name="Sobre os Códigos 2FA e sua Duração",
-        value=(
-            "Os códigos 2FA são senhas de uso único baseadas em tempo. "
-            "**Cada código é válido por apenas 30 segundos.** "
-            "Após esse tempo, o código expira e um novo deve ser gerado. "
-            "Certifique-se de inserir o código rapidamente no site da Rockstar."
-        ),
-        inline=False
-    )
-
-    embed.set_footer(text="Rockstar 2FA Bot | Segurança Máxima", icon_url="https://upload.wikimedia.org/wikipedia/commons/thumb/5/52/Rockstar_Games_Logo.svg/1200px-Rockstar_Games_Logo.svg.png")
-    embed.set_thumbnail(url="https://upload.wikimedia.org/wikipedia/commons/thumb/5/52/Rockstar_Games_Logo.svg/1200px-Rockstar_Games_Logo.svg.png")
-
-    return embed
-
 bot = discord.Bot()
+
+# --- COMANDOS DE ADMINISTRAÇÃO ---
+
+admin_group = bot.create_group("admin", "Comandos de administração do painel")
+
+@admin_group.command(name="set_visual", description="Configura o visual do painel 2FA")
+async def set_visual(
+    ctx: discord.ApplicationContext,
+    titulo: discord.Option(str, "Novo título do painel", required=False),
+    descricao: discord.Option(str, "Nova descrição do painel", required=False),
+    cor_hex: discord.Option(str, "Cor em Hex (ex: 5865F2)", required=False),
+    imagem_url: discord.Option(str, "URL da imagem grande", required=False),
+    thumbnail_url: discord.Option(str, "URL da imagem pequena (thumbnail)", required=False)
+):
+    if not ctx.author.guild_permissions.administrator:
+        return await ctx.respond("❌ Apenas administradores podem usar este comando.", ephemeral=True)
+    
+    config = load_config()
+    
+    if titulo: config["title"] = titulo
+    if descricao: config["description"] = descricao.replace("\\n", "\n")
+    if cor_hex:
+        try:
+            config["color"] = int(cor_hex.lstrip("#"), 16)
+        except ValueError:
+            return await ctx.respond("❌ Formato de cor inválido! Use Hexadecimal (ex: FF00FF).", ephemeral=True)
+    if imagem_url: config["image_url"] = imagem_url
+    if thumbnail_url: config["thumbnail_url"] = thumbnail_url
+    
+    save_config(config)
+    await ctx.respond("✅ Configurações visuais atualizadas com sucesso!", ephemeral=True)
 
 @bot.slash_command(name="setup2fa", description="Configura o painel interativo de 2FA")
 async def setup2fa(ctx: discord.ApplicationContext):
-    # Verificação básica de permissão (opcional, pode ser removida se quiser que qualquer um use)
     if not ctx.author.guild_permissions.administrator:
         return await ctx.respond("❌ Apenas administradores podem configurar o painel.", ephemeral=True)
     
-    embed = get_rockstar_2fa_embed()
-    view = Generate2FAButton()
+    config = load_config()
+    embed = discord.Embed(
+        title=config["title"],
+        description=config["description"],
+        color=config["color"]
+    )
+    if config.get("image_url"):
+        embed.set_image(url=config["image_url"])
+    if config.get("thumbnail_url"):
+        embed.set_thumbnail(url=config["thumbnail_url"])
     
+    embed.set_footer(text="Rockstar 2FA Bot | Segurança Máxima")
+    
+    view = Generate2FAButton()
     await ctx.respond("Painel configurado com sucesso!", ephemeral=True)
     await ctx.channel.send(embed=embed, view=view)
 
 @bot.event
 async def on_ready():
-    # Registrar a view persistente para que o botão funcione após reiniciar o bot
     bot.add_view(Generate2FAButton())
     print(f"✅ Bot 2FA Online como {bot.user}")
 
@@ -151,3 +148,4 @@ if token:
     bot.run(token)
 else:
     print("❌ Erro: DISCORD_BOT_TOKEN não encontrado.")
+
